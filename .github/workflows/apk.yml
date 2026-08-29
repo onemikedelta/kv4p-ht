@@ -8,18 +8,43 @@ on:
 jobs:
   apk:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android-src/KV4PHT
     steps:
       - uses: actions/checkout@v4
+
+      # --- 1) Build the ESP32 firmware from source (this one HAS BLE) ---
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+      - name: Install PlatformIO
+        run: pip install -U platformio
+      - name: Build firmware
+        working-directory: microcontroller-src
+        run: pio run -e esp32dev-release
+
+      # --- 2) Put it inside the app, replacing the old pre-BLE binary ---
+      - name: Bundle firmware into app
+        run: |
+          cp microcontroller-src/.pio/build/esp32dev-release/firmware.bin \
+             android-src/KV4PHT/app/src/main/res/raw/firmware_v17.bin
+          ls -l android-src/KV4PHT/app/src/main/res/raw/firmware_v17.bin
+          if grep -aq "BLE KISS" android-src/KV4PHT/app/src/main/res/raw/firmware_v17.bin; then
+            echo "OK: firmware contains BLE"
+          else
+            echo "ERROR: firmware has no BLE strings"; exit 1
+          fi
+
+      # --- 3) Build the APK ---
       - uses: actions/setup-java@v4
         with:
           java-version: 17
           distribution: temurin
       - uses: android-actions/setup-android@v3
-      - run: chmod +x ./gradlew
-      - run: ./gradlew assembleDebug --stacktrace
+      - name: Build APK
+        working-directory: android-src/KV4PHT
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace
+
       - uses: actions/upload-artifact@v4
         with:
           name: kv4p-ht-debug-apk

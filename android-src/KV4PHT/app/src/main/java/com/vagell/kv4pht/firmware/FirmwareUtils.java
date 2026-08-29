@@ -36,7 +36,7 @@ public final class FirmwareUtils {
 
     private static final AtomicBoolean isFlashing = new AtomicBoolean(false);
 
-    public static final int PACKAGED_FIRMWARE_VER = 17;
+    public static final int PACKAGED_FIRMWARE_VER = 18;
 
     private static final int ESP32_BOOTLOADER = R.raw.bootloader;
     private static final int ESP32_PARTITION_TABLE = R.raw.partitions;
