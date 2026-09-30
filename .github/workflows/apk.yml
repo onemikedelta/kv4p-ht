@@ -8,24 +8,38 @@ on:
 jobs:
   apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@v7
 
-      # --- 1) Build the ESP32 firmware from source (this one HAS BLE) ---
-      - uses: actions/setup-python@v4
+      # --- 1) Build the ESP32 firmware from source (this one has BLE) ---
+      - name: Set up Python
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.x'
+          python-version: "3.x"
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.platformio/.cache
+          key: ${{ runner.os }}-platformio-${{ hashFiles('microcontroller-src/platformio.ini') }}
+          restore-keys: ${{ runner.os }}-platformio-
+
+      # Pinned on purpose: newer PlatformIO releases break espressif32 @ 6.10.0.
       - name: Install PlatformIO
-        run: pip install -U platformio
-      - name: Build firmware
+        run: python -m pip install platformio==6.1.18
+
+      - name: Build release firmware
         working-directory: microcontroller-src
         run: pio run -e esp32dev-release
 
-      # --- 2) Put it inside the app, replacing the old pre-BLE binary ---
-      - name: Bundle firmware into app
+      # --- 2) Put it inside the app, replacing the bundled pre-BLE binary ---
+      - name: Bundle firmware with the Android app
         run: |
-          cp microcontroller-src/.pio/build/esp32dev-release/firmware.bin \
-             android-src/KV4PHT/app/src/main/res/raw/firmware_v17.bin
+          install -m 0644 \
+            microcontroller-src/.pio/build/esp32dev-release/firmware.bin \
+            android-src/KV4PHT/app/src/main/res/raw/firmware_v17.bin
           ls -l android-src/KV4PHT/app/src/main/res/raw/firmware_v17.bin
           if grep -aq "BLE KISS" android-src/KV4PHT/app/src/main/res/raw/firmware_v17.bin; then
             echo "OK: firmware contains BLE"
@@ -34,18 +48,22 @@ jobs:
           fi
 
       # --- 3) Build the APK ---
-      - uses: actions/setup-java@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
         with:
-          java-version: 17
           distribution: temurin
-      - uses: android-actions/setup-android@v3
-      - name: Build APK
-        working-directory: android-src/KV4PHT
-        run: |
-          chmod +x ./gradlew
-          ./gradlew assembleDebug --stacktrace
+          java-version: "17"
 
-      - uses: actions/upload-artifact@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build and test the Android app
+        working-directory: android-src/KV4PHT
+        run: ./gradlew :app:compileDebugJavaWithJavac :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
         with:
           name: kv4p-ht-debug-apk
           path: android-src/KV4PHT/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
