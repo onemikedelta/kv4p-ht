@@ -22,6 +22,9 @@ public final class Protocol {
     private static final String TAG = Protocol.class.getSimpleName();
 
     public static final int PROTO_MTU = 2048; // Maximum length of the frame
+    // APRS maximum AX.25 UI frame excluding the FCS: ten 7-byte address fields,
+    // control/PID, and a 256-byte information field.
+    public static final int AX25_MAX_KISS_DATA_LEN = (10 * 7) + 2 + 256;
 
     // KV4P KISS transport. Standard KISS DATA frames carry AX.25 packets.
     // kv4p-specific commands are carried in KISS SETHARDWARE vendor frames:
@@ -31,6 +34,7 @@ public final class Protocol {
     static final int KISS_TFEND = 0xDC;
     static final int KISS_TFESC = 0xDD;
     static final int KISS_CMD_DATA = 0x00;
+    static final int KISS_CMD_TXDELAY = 0x01;
     static final int KISS_CMD_SETHARDWARE = 0x06;
     static final int KISS_PORT_0 = 0x00;
     static final int KV4P_PROTOCOL_VERSION = 0x01;
@@ -54,7 +58,9 @@ public final class Protocol {
     public enum SndCommand {
         COMMAND_SND_UNKNOWN(0x00),
         COMMAND_HOST_TX_AUDIO(0x0C), // [COMMAND_HOST_TX_AUDIO(byte[])]
-        COMMAND_HOST_DESIRED_STATE(0x0D);
+        COMMAND_HOST_DESIRED_STATE(0x0D),
+        COMMAND_HOST_TX_DIGITAL(0x0E),
+        COMMAND_HOST_TX_AX25(0x0F); // [float freqTx, uint8 bw, uint8 ctcssTx, AX.25 bytes]
         private final int value;
         SndCommand(int value) {
             this.value = value;
@@ -72,7 +78,8 @@ public final class Protocol {
         COMMAND_HELLO(0x06),            // [COMMAND_HELLO(Hello)]
         COMMAND_RX_AUDIO(0x0C),         // [COMMAND_RX_AUDIO(int8_t[])]
         COMMAND_WINDOW_UPDATE(0x09),    // [COMMAND_WINDOW_UPDATE()]
-        COMMAND_DEVICE_STATE(0x0B);
+        COMMAND_DEVICE_STATE(0x0B),
+        COMMAND_RX_DIGITAL(0x0E);
         private static final RcvCommand[] VALUES = values();
         private final int value;
         RcvCommand(int value) {
@@ -120,6 +127,7 @@ public final class Protocol {
     static final int DEVICE_STATE_SQUELCHED = 1 << 10;
     static final int HOST_STATE_TX_ALLOWED = 1 << 11;
     static final int HOST_STATE_ENABLE_STATUS_REPORTS = 1 << 12;
+    static final int HOST_STATE_FREEDV_2400B = 1 << 13;
 
     @Getter
     public enum DeviceMode {
@@ -272,6 +280,7 @@ public final class Protocol {
         private final float maxRadioFreq;
         private final boolean hasHl;
         private final boolean hasPhysPtt;
+        private final boolean hasFreeDv2400b;
         public static Optional<FirmwareVersion> from(final ByteBuffer buffer, int offset, Integer len) {
             return Optional.ofNullable(buffer)
                 .filter(b -> len != null && len == BYTE_LEN && offset >= 0 && b.limit() >= offset + len)
@@ -287,6 +296,7 @@ public final class Protocol {
                         .maxRadioFreq(b.getFloat(offset + 12))
                         .hasHl((features & 0x01) != 0)
                         .hasPhysPtt((features & 0x02) != 0)
+                        .hasFreeDv2400b((features & 0x08) != 0)
                         .build();
                 });
         }
@@ -353,6 +363,9 @@ public final class Protocol {
         }
 
         private void sendKissDataFrame(byte[] ax25Bytes) {
+            if (ax25Bytes != null && ax25Bytes.length > AX25_MAX_KISS_DATA_LEN) {
+                throw new IllegalArgumentException("AX.25 packet exceeds APRS maximum frame length");
+            }
             sendKissFrame(KISS_CMD_DATA, ax25Bytes, ax25Bytes != null ? ax25Bytes.length : 0);
         }
 
@@ -360,8 +373,40 @@ public final class Protocol {
             sendKv4pVendorFrame(SndCommand.COMMAND_HOST_TX_AUDIO, audio, len);
         }
 
+        public void txDigital(byte[] frame) {
+            sendKv4pVendorFrame(SndCommand.COMMAND_HOST_TX_DIGITAL, frame, frame.length);
+        }
+
         public void txAx25(byte[] ax25Bytes) {
             sendKissDataFrame(ax25Bytes);
+        }
+
+        /**
+         * Queues an AX.25 packet using a temporary transmit configuration. The
+         * firmware restores its normal receive configuration after the packet.
+         */
+        public void txAx25OnFrequency(float freqTx, byte bandwidth, byte ctcssTx, byte[] ax25Bytes) {
+            int ax25Len = ax25Bytes != null ? ax25Bytes.length : 0;
+            if (ax25Len > AX25_MAX_KISS_DATA_LEN) {
+                throw new IllegalArgumentException("AX.25 packet exceeds APRS maximum frame length");
+            }
+            byte[] payload = new byte[6 + ax25Len];
+            ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+                .putFloat(freqTx)
+                .put(bandwidth)
+                .put(ctcssTx);
+            if (ax25Len > 0) {
+                System.arraycopy(ax25Bytes, 0, payload, 6, ax25Len);
+            }
+            sendKv4pVendorFrame(SndCommand.COMMAND_HOST_TX_AX25, payload, payload.length);
+        }
+
+        /** Sets KISS TXDELAY in standard 10 ms units. */
+        public void setKissTxDelay(int value) {
+            if (value < 0 || value > 0xFF) {
+                throw new IllegalArgumentException("KISS TXDELAY must fit in one byte");
+            }
+            sendKissFrame(KISS_CMD_TXDELAY, new byte[]{(byte) value}, 1);
         }
 
         private int encodeKissFrame(int kissCommand, byte[] payload, int len) {
@@ -574,7 +619,7 @@ public final class Protocol {
                 return;
             }
             if (kissCommand == KISS_CMD_DATA) {
-                if (payloadLen > 0 && payloadLen <= PROTO_MTU) {
+                if (payloadLen > 0 && payloadLen <= AX25_MAX_KISS_DATA_LEN) {
                     onAx25.accept(frameBuffer, 1, payloadLen);
                 }
             } else if (kissCommand == KISS_CMD_SETHARDWARE) {
