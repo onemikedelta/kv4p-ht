@@ -167,4 +167,18 @@
     <string name="flash_firmware_button">Flash</string>
     <string name="firmware_flash_requires_usb">Connect the radio by USB to flash firmware</string>
     <string name="aprs_message_not_accepted">APRS message was not accepted for transmission.</string>
+    <string name="export_memories_menu_item">Export memories</string>
+    <string name="import_memories_menu_item">Import memories</string>
+    <string name="export_memories_file_name" translatable="false">kv4p-memories.csv</string>
+    <string name="export_memories_empty">No memories to export</string>
+    <string name="export_memories_done">Exported %1$d memories</string>
+    <string name="export_memories_failed">Could not write the memories file</string>
+    <string name="import_memories_title">Import memories?</string>
+    <string name="import_memories_message">Add these memories to the ones you already have, or replace all of them?</string>
+    <string name="import_memories_add_button">Add</string>
+    <string name="import_memories_replace_button">Replace all</string>
+    <string name="import_memories_done">Imported %1$d memories</string>
+    <string name="import_memories_done_with_skips">Imported %1$d memories, skipped %2$d unreadable rows</string>
+    <string name="import_memories_empty">No memories found in that file</string>
+    <string name="import_memories_failed">Could not read the memories file</string>
 </resources>

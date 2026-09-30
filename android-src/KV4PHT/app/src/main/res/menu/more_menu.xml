@@ -9,6 +9,14 @@
     </group>
 
     <group>
+        <item android:id="@+id/export_memories"
+            android:title="@string/export_memories_menu_item" />
+
+        <item android:id="@+id/import_memories"
+            android:title="@string/import_memories_menu_item" />
+    </group>
+
+    <group>
         <item android:id="@+id/settings"
             android:title="@string/settings" />
     </group>

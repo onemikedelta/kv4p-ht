@@ -46,6 +46,9 @@ public interface ChannelMemoryDao {
     @Delete
     void delete(ChannelMemory channelMemory);
 
+    @Query("DELETE FROM channel_memories")
+    void deleteAll();
+
     @Update
     void update(ChannelMemory channelMemory);
 }

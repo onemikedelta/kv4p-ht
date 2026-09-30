@@ -33,6 +33,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.hardware.usb.UsbManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -52,6 +53,8 @@ import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -73,11 +76,18 @@ import com.vagell.kv4pht.R;
 import com.vagell.kv4pht.data.AprsFeedPolicy;
 import com.vagell.kv4pht.data.AppSetting;
 import com.vagell.kv4pht.data.ChannelMemory;
+import com.vagell.kv4pht.data.ChannelMemoryCsv;
+import com.vagell.kv4pht.data.ChannelMemoryDao;
 import com.vagell.kv4pht.databinding.ActivityMainBinding;
 import com.vagell.kv4pht.radio.RadioAudioService;
 import com.vagell.kv4pht.radio.RadioModuleController;
 import com.vagell.kv4pht.radio.RadioMode;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -131,12 +141,23 @@ public class MainActivity extends AppCompatActivity {
     public static final int REQUEST_FIRMWARE = 3;
     public static final int REQUEST_FIND_REPEATERS = 4;
 
+    private static final String MEMORIES_MIME_TYPE = "text/csv";
+    // Some file providers label a CSV as plain text or as an unknown binary, so accept those too.
+    private static final String[] MEMORIES_IMPORT_MIME_TYPES = {
+        MEMORIES_MIME_TYPE, "text/comma-separated-values", "text/plain", "application/octet-stream"};
+
     private MainViewModel viewModel;
     private MemoriesAdapter memoriesAdapter;
     private RecyclerView aprsRecyclerView;
     private APRSAdapter aprsAdapter;
 
     private final ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(2, 10, 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+
+    // Memory backup uses the system file picker, so the app needs no storage permission.
+    private final ActivityResultLauncher<String> exportMemoriesLauncher =
+        registerForActivityResult(new ActivityResultContracts.CreateDocument(MEMORIES_MIME_TYPE), this::writeMemoriesCsv);
+    private final ActivityResultLauncher<String[]> importMemoriesLauncher =
+        registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::confirmMemoriesImport);
 
     private String selectedMemoryGroup = null; // null means unfiltered, no group selected
     private int activeMemoryId = -1; // -1 means we're in simplex mode
@@ -1835,6 +1856,10 @@ public class MainActivity extends AppCompatActivity {
                                 // Do nothing.
                             })
                             .show();
+                } else if (item.getItemId() == R.id.export_memories) {
+                    exportMemoriesLauncher.launch(getString(R.string.export_memories_file_name));
+                } else if (item.getItemId() == R.id.import_memories) {
+                    importMemoriesLauncher.launch(MEMORIES_IMPORT_MIME_TYPES);
                 } else if (item.getItemId() == R.id.settings) {
                     startSettingsActivity();
                 }
@@ -1849,6 +1874,112 @@ public class MainActivity extends AppCompatActivity {
 
     private boolean canFlashFirmware() {
         return radioAudioService != null && radioAudioService.canFlashFirmware();
+    }
+
+    /**
+     * Writes every saved memory to the file the user picked. The system file picker grants access
+     * to that one file, so no storage permission is involved.
+     *
+     * @param uri The file to write, or null when the user backed out of the picker.
+     */
+    private void writeMemoriesCsv(Uri uri) {
+        if (uri == null) {
+            return;
+        }
+        threadPoolExecutor.execute(() -> {
+            try {
+                List<ChannelMemory> memories = viewModel.getAppDb().channelMemoryDao().getAll();
+                if (memories.isEmpty()) {
+                    showMemoriesSnackbar(getString(R.string.export_memories_empty));
+                    return;
+                }
+                byte[] csv = ChannelMemoryCsv.toCsv(memories).getBytes(StandardCharsets.UTF_8);
+                // "wt" truncates, so exporting over a longer file cannot leave a stale tail behind.
+                try (OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+                    if (out == null) {
+                        throw new IOException("No output stream for the chosen file");
+                    }
+                    out.write(csv);
+                }
+                showMemoriesSnackbar(getString(R.string.export_memories_done, memories.size()));
+            } catch (IOException | SecurityException e) {
+                Log.e(LOG_TAG, "Could not export memories", e);
+                showMemoriesSnackbar(getString(R.string.export_memories_failed));
+            }
+        });
+    }
+
+    /**
+     * Asks whether an imported file should be added to the existing memories or replace them,
+     * since replacing is destructive.
+     *
+     * @param uri The file to read, or null when the user backed out of the picker.
+     */
+    private void confirmMemoriesImport(Uri uri) {
+        if (uri == null) {
+            return;
+        }
+        new MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.import_memories_title))
+            .setMessage(getString(R.string.import_memories_message))
+            .setPositiveButton(getString(R.string.import_memories_add_button),
+                (d, i) -> importMemoriesCsv(uri, false))
+            .setNeutralButton(getString(R.string.import_memories_replace_button),
+                (d, i) -> importMemoriesCsv(uri, true))
+            .setNegativeButton(getString(R.string.cancel_display), (d, i) -> {
+                // Do nothing.
+            })
+            .show();
+    }
+
+    private void importMemoriesCsv(Uri uri, boolean replaceExisting) {
+        threadPoolExecutor.execute(() -> {
+            ChannelMemoryCsv.ImportResult result;
+            try {
+                result = ChannelMemoryCsv.fromCsv(readTextFromUri(uri));
+            } catch (IOException | SecurityException e) {
+                Log.e(LOG_TAG, "Could not import memories", e);
+                showMemoriesSnackbar(getString(R.string.import_memories_failed));
+                return;
+            }
+            List<ChannelMemory> memories = result.getMemories();
+            if (memories.isEmpty()) {
+                showMemoriesSnackbar(getString(R.string.import_memories_empty));
+                return;
+            }
+            ChannelMemoryDao channelMemoryDao = viewModel.getAppDb().channelMemoryDao();
+            if (replaceExisting) {
+                channelMemoryDao.deleteAll();
+            }
+            channelMemoryDao.insertAll(memories.toArray(new ChannelMemory[0]));
+            showMemoriesSnackbar(result.getSkippedRows() == 0
+                ? getString(R.string.import_memories_done, memories.size())
+                : getString(R.string.import_memories_done_with_skips, memories.size(), result.getSkippedRows()));
+            // Imported memories may belong to groups that are filtered out right now, so show them all.
+            viewModel.loadDataAsync(() ->
+                runOnUiThread(() -> selectMemoryGroup(getString(R.string.all_memories))));
+        });
+    }
+
+    private String readTextFromUri(Uri uri) throws IOException {
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) {
+                throw new IOException("No input stream for the chosen file");
+            }
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            int read;
+            while ((read = in.read(chunk)) != -1) {
+                buffer.write(chunk, 0, read);
+            }
+            return buffer.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
+    private void showMemoriesSnackbar(CharSequence message) {
+        runOnUiThread(() -> Snackbar.make(this, findViewById(R.id.mainTopLevelLayout), message, LENGTH_LONG)
+            .setAnchorView(findViewById(R.id.bottomNavigationView))
+            .show());
     }
 
     /**
