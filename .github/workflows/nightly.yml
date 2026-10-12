@@ -1,9 +1,9 @@
 name: Nightly build
 
 on:
-  schedule:
+  #schedule:
     # Run away from the top of the hour, when scheduled Actions are busiest.
-    - cron: "17 3 * * *"
+    #- cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       force:
